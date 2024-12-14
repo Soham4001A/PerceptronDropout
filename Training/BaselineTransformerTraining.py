@@ -126,19 +126,17 @@ class TransformerBlock(tf.keras.layers.Layer):
 
 def build_transformer_model(input_shape, embed_dim, num_heads, ff_dim, num_transformer_blocks, dropout_rate):
     inputs = Input(shape=(input_shape,))
-    x = Dense(embed_dim, kernel_regularizer=l2(0.05))(inputs)
-    x = Reshape((1, embed_dim))(x)  # Ensures embedding dimension is properly set
+    x = Dense(embed_dim, kernel_regularizer=l2(0.05), name="Dense_Embed")(inputs)
+    x = Reshape((1, embed_dim))(x)  # Ensure embedding dimension is properly set
 
-    for _ in range(num_transformer_blocks):
-        x = TransformerBlock(embed_dim, num_heads, ff_dim, dropout_rate)(x)
+    for block_id in range(num_transformer_blocks):
+        x = TransformerBlock(embed_dim, num_heads, ff_dim, dropout_rate, name=f"TransformerBlock_{block_id}")(x)
     
-    x = Flatten()(x)  # This should create a 2D tensor [batch_size, features]
-    x = Dropout(dropout_rate)(x)  # Adds dropout layer
+    x = Flatten()(x)  # Create a 2D tensor [batch_size, features]
+    x = Dropout(dropout_rate, name="Dropout_Final")(x)
+    output_layer = Dense(y_trim_encoded.shape[1], activation='softmax', kernel_regularizer=l2(0.01), name="Output")(x)
 
-    num_classes = y_trim_encoded.shape[1]
-    trim_output = Dense(num_classes, activation='softmax', kernel_regularizer=l2(0.01))(x)  # Applies softmax directly to the 2D tensor
-
-    model = Model(inputs=inputs, outputs=trim_output)
+    model = Model(inputs=inputs, outputs=output_layer, name="TransformerModel")
     return model
 
 # Build the transformer model
@@ -230,5 +228,110 @@ for i in range(10):
     avg_perc_diff.append(percent_diff)
 
 print(f"Average Percent Difference: {np.mean(avg_perc_diff)}%")
+
+#--------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+#RECORDING PERCEPTRON ACTIVATIONS - POST TRAINING THRU A RUN OF THE DATASET
+
+# Step 1: Create a hook for perceptron outputs
+class PerceptronOutputExtractor:
+    def __init__(self, model):
+        """
+        Initialize with the base model to extract perceptron outputs.
+        """
+        self.model = model
+
+    def extract_outputs(self, inputs):
+        """
+        Extract outputs from layers of the model for the given inputs.
+        Returns a dictionary with perceptron IDs as keys and their outputs as values.
+        """
+        layer_outputs = {}
+        x = inputs  # Start with the input data
+
+        for layer in self.model.layers:
+            try:
+                # Skip Input layers
+                if isinstance(layer, tf.keras.layers.InputLayer):
+                    continue
+
+                # Handle different layer types
+                if isinstance(layer, Dense):
+                    # Pass through Dense layers and store perceptron outputs
+                    x = layer(x)
+                    layer_name = layer.name
+                    perceptron_outputs = x.numpy().flatten()
+                    for perceptron_id, perceptron_value in enumerate(perceptron_outputs):
+                        key = f"{layer_name}_{perceptron_id}"
+                        layer_outputs[key] = perceptron_value
+
+                elif isinstance(layer, Dropout):
+                    # Skip Dropout layers during extraction
+                    x = layer(x, training=False)
+
+                elif isinstance(layer, MultiHeadAttention):
+                    # Handle MultiHeadAttention layers
+                    x = layer(x, x)  # Assumes self-attention for simplicity
+
+                elif isinstance(layer, Flatten):
+                    # Flatten outputs
+                    x = layer(x)
+
+                elif isinstance(layer, Reshape):
+                    # Reshape the tensor
+                    x = layer(x)
+
+                elif isinstance(layer, LayerNormalization):
+                    # Handle normalization layers
+                    x = layer(x)
+
+                else:
+                    # Default behavior: Pass data through the layer
+                    x = layer(x)
+
+            except Exception as e:
+                print(f"Error processing layer {layer.name}: {e}")
+                raise e
+
+        return layer_outputs
+    
+# Initialize the extractor with the trained model
+extractor = PerceptronOutputExtractor(loaded_model)
+
+# Step 2: Generate perceptron outputs for training data
+def generate_perceptron_outputs(extractor, X_train):
+    """
+    Run the training data through the extractor and gather perceptron outputs.
+    """
+    all_outputs = []
+
+    for i in range(len(X_train)):
+        single_input = np.expand_dims(X_train[i], axis=0)  # Prepare a single input
+        perceptron_outputs = extractor.extract_outputs(tf.constant(single_input, dtype=tf.float32))
+
+        # Convert the outputs into key-value format for saving
+        for perceptron_id, perceptron_value in perceptron_outputs.items():
+            all_outputs.append({"perceptron_id": perceptron_id, "output": perceptron_value})
+
+    return all_outputs
+
+# Generate the perceptron output dictionary
+perceptron_outputs = generate_perceptron_outputs(extractor, X_train)
+
+# Step 3: Save outputs to CSV
+def save_perceptron_outputs_to_csv(perceptron_outputs, output_file):
+    """
+    Save perceptron outputs to a CSV file.
+    """
+    df = pd.DataFrame(perceptron_outputs)
+    df.to_csv(output_file, index=False)
+
+# Save the outputs to a CSV file
+output_file = "/Users/sohamsane/Documents/Coding Projects/PerceptronDropout/Data/PerceptronActivations.csv"
+save_perceptron_outputs_to_csv(perceptron_outputs, output_file)
+
+print(f"Perceptron outputs saved to {output_file}")
+
 
 #--------------------------------------------------------------------------------------------------------------------------------------------------
