@@ -1,5 +1,9 @@
 import pandas as pd
 import numpy as np
+import json
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import warnings
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
@@ -11,9 +15,7 @@ from tensorflow.keras.regularizers import l2
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
-import tensorflow as tf
-import matplotlib.pyplot as plt
-import warnings
+
 
 # Suppress all warnings
 warnings.filterwarnings('ignore')
@@ -174,10 +176,10 @@ history = model.fit(X_train, y_trim_train,
                     callbacks=[early_stopping])
 
 # Save the model
-model.save('transformer_trim_model.keras')
+model.save('/Users/sohamsane/Documents/Coding Projects/PerceptronDropout/baseline_model.keras')
 
 # Load the saved model
-loaded_model = tf.keras.models.load_model('transformer_trim_model.keras', custom_objects={'TransformerBlock': TransformerBlock})
+loaded_model = tf.keras.models.load_model('/Users/sohamsane/Documents/Coding Projects/PerceptronDropout/baseline_model.keras', custom_objects={'TransformerBlock': TransformerBlock})
 
 #------------------------------------------------------------------------------------------------------------------------------------
 # DEBUGGING TRAINING OUTPUT 
@@ -237,18 +239,15 @@ print(f"Average Percent Difference: {np.mean(avg_perc_diff)}%")
 # Step 1: Create a hook for perceptron outputs
 class PerceptronOutputExtractor:
     def __init__(self, model):
-        """
-        Initialize with the base model to extract perceptron outputs.
-        """
         self.model = model
 
     def extract_outputs(self, inputs):
         """
-        Extract outputs from layers of the model for the given inputs.
-        Returns a dictionary with perceptron IDs as keys and their outputs as values.
+        Extract perceptron inputs and outputs from the model for the given inputs.
+        Returns a dictionary with perceptron IDs as keys and their inputs/outputs as values.
         """
-        layer_outputs = {}
-        x = inputs  # Start with the input data
+        layer_data = {}  # Store inputs and outputs for each perceptron
+        x = inputs
 
         for layer in self.model.layers:
             try:
@@ -256,82 +255,112 @@ class PerceptronOutputExtractor:
                 if isinstance(layer, tf.keras.layers.InputLayer):
                     continue
 
-                # Handle different layer types
                 if isinstance(layer, Dense):
-                    # Pass through Dense layers and store perceptron outputs
+                    # Store perceptron inputs (before activation)
+                    perceptron_inputs = x.numpy().flatten()
+                    
+                    # Forward pass
                     x = layer(x)
-                    layer_name = layer.name
+
+                    # Store perceptron outputs (after activation)
                     perceptron_outputs = x.numpy().flatten()
-                    for perceptron_id, perceptron_value in enumerate(perceptron_outputs):
+                    layer_name = layer.name
+
+                    # Record data for each perceptron
+                    for perceptron_id, (input_value, output_value) in enumerate(zip(perceptron_inputs, perceptron_outputs)):
                         key = f"{layer_name}_{perceptron_id}"
-                        layer_outputs[key] = perceptron_value
+                        layer_data[key] = {
+                            "input": input_value,
+                            "output": output_value
+                        }
 
                 elif isinstance(layer, Dropout):
-                    # Skip Dropout layers during extraction
                     x = layer(x, training=False)
 
                 elif isinstance(layer, MultiHeadAttention):
-                    # Handle MultiHeadAttention layers
-                    x = layer(x, x)  # Assumes self-attention for simplicity
+                    x = layer(x, x)  # Self-attention for simplicity
 
                 elif isinstance(layer, Flatten):
-                    # Flatten outputs
                     x = layer(x)
 
                 elif isinstance(layer, Reshape):
-                    # Reshape the tensor
                     x = layer(x)
 
                 elif isinstance(layer, LayerNormalization):
-                    # Handle normalization layers
                     x = layer(x)
 
                 else:
-                    # Default behavior: Pass data through the layer
                     x = layer(x)
 
             except Exception as e:
                 print(f"Error processing layer {layer.name}: {e}")
                 raise e
 
-        return layer_outputs
+        return layer_data
     
 # Initialize the extractor with the trained model
 extractor = PerceptronOutputExtractor(loaded_model)
 
 # Step 2: Generate perceptron outputs for training data
-def generate_perceptron_outputs(extractor, X_train):
+def generate_perceptron_outputs(extractor, model, X_train):
     """
-    Run the training data through the extractor and gather perceptron outputs.
+    Run the training data through the extractor and gather inputs, outputs, and perceptron activations.
     """
-    all_outputs = []
+    grouped_outputs = []
 
     for i in range(len(X_train)):
         single_input = np.expand_dims(X_train[i], axis=0)  # Prepare a single input
-        perceptron_outputs = extractor.extract_outputs(tf.constant(single_input, dtype=tf.float32))
+        perceptron_data = extractor.extract_outputs(tf.constant(single_input, dtype=tf.float32))
 
-        # Convert the outputs into key-value format for saving
-        for perceptron_id, perceptron_value in perceptron_outputs.items():
-            all_outputs.append({"perceptron_id": perceptron_id, "output": perceptron_value})
+        # Get the model's prediction for this input
+        model_output = model.predict(single_input, verbose=0).flatten()
 
-    return all_outputs
+        # Create a grouped entry
+        group = {
+            "input": single_input.flatten().tolist(),  # Convert input to a list
+            "output": model_output.tolist(),          # Convert output to a list
+            "perceptrons": perceptron_data            # Dictionary of perceptron inputs/outputs
+        }
 
-# Generate the perceptron output dictionary
-perceptron_outputs = generate_perceptron_outputs(extractor, X_train)
+        grouped_outputs.append(group)
+
+    return grouped_outputs
 
 # Step 3: Save outputs to CSV
-def save_perceptron_outputs_to_csv(perceptron_outputs, output_file):
+def convert_to_serializable(data):
     """
-    Save perceptron outputs to a CSV file.
+    Recursively convert TensorFlow and NumPy types to Python native types.
     """
-    df = pd.DataFrame(perceptron_outputs)
-    df.to_csv(output_file, index=False)
+    if isinstance(data, dict):
+        return {k: convert_to_serializable(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_to_serializable(v) for v in data]
+    elif isinstance(data, np.ndarray):
+        return data.tolist()  # Convert NumPy arrays to Python lists
+    elif isinstance(data, (np.float32, np.float64, np.int32, np.int64)):
+        return data.item()  # Convert NumPy scalar types to Python scalars
+    elif isinstance(data, tf.Tensor):
+        return data.numpy().tolist()  # Convert TensorFlow tensors to Python lists
+    elif hasattr(data, 'dtype') and isinstance(data.dtype, tf.dtypes.DType):
+        return float(data)  # Convert TensorFlow scalar to Python float
+    else:
+        return data  # Return as-is if already serializable
 
-# Save the outputs to a CSV file
-output_file = "/Users/sohamsane/Documents/Coding Projects/PerceptronDropout/Data/PerceptronActivations.csv"
-save_perceptron_outputs_to_csv(perceptron_outputs, output_file)
+def save_grouped_data_to_json(grouped_outputs, output_file):
+    """
+    Save grouped data (inputs, outputs, and perceptron data) to a JSON file.
+    """
+    serializable_data = convert_to_serializable(grouped_outputs)  # Convert to serializable format
+    with open(output_file, "w") as f:
+        json.dump(serializable_data, f, indent=4)
 
-print(f"Perceptron outputs saved to {output_file}")
+
+# Generate & Save the outputs to a JSON file
+grouped_outputs = generate_perceptron_outputs(extractor, model, X_train)
+output_file = "/Users/sohamsane/Documents/Coding Projects/PerceptronDropout/Data/GroupedPerceptronDataWithInputs.json"
+save_grouped_data_to_json(grouped_outputs, output_file)
+
+print(f"Grouped perceptron data with inputs saved to {output_file}")
 
 
 #--------------------------------------------------------------------------------------------------------------------------------------------------
