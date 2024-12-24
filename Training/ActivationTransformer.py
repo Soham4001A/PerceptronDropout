@@ -298,7 +298,8 @@ def train_step(x_batch, y_batch):
 
         # Add L1 regularization to encourage sparsity in the mask
         l1_loss = tf.reduce_sum(tf.abs(mask_pred))
-        loss_value += 0.001 * l1_loss
+        l2_loss = tf.reduce_sum(tf.square(mask_pred))
+        loss_value += 0.01 * l1_loss + 0.1 * l2_loss
 
     # Compute gradients with respect to the Activation Transformer's trainable variables
     grads = tape.gradient(loss_value, secondary_model.trainable_variables)
