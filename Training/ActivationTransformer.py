@@ -25,7 +25,7 @@ import json
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
+from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate, Reshape, Flatten
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras import backend as K
@@ -176,10 +176,17 @@ for layer in baseline_model.layers:
         total_perceptrons += layer.units
 
 # We also need the dimension of X_train (post-preprocessing)
-num_input_features = X_train.shape[1]  # e.g. 6 + one-hot expansions
+num_input_features = X_train.shape[1]  # Preprocessed baseline input features
+combined_input_size = num_input_features + total_perceptrons
 
-secondary_model = build_activation_transformer(num_input_features, total_perceptrons)
-
+secondary_model = build_activation_transformer(
+    num_input_features=num_input_features,        # Baseline input size
+    total_perceptrons=total_perceptrons,          # Perceptron count
+    num_heads=3,                                  # Transformer heads
+    ff_dim=128,                                   # Feed-forward size
+    num_transformer_blocks=2,                     # Transformer layers
+    dropout_rate=0.1                              # Dropout rate
+)
 # ------------------------------------------------
 # 5) Nullify Function
 # ------------------------------------------------
