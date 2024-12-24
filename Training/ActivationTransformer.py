@@ -23,6 +23,7 @@ import numpy as np
 import tensorflow as tf
 import json
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Dropout, Concatenate
 from tensorflow.keras.optimizers import Adam
@@ -212,7 +213,7 @@ def nullify_activations(perceptron_dict, mask, layer_units, null_value=0.001):
 # 6) Build a Custom Training Loop
 # ------------------------------------------------
 mse_loss_fn = MeanSquaredError()
-optimizer = Adam(learning_rate=1e-3)
+optimizer = Adam(learning_rate=0.0003)
 
 @tf.function
 def train_step(x_batch, y_batch):
@@ -281,7 +282,7 @@ def train_step(x_batch, y_batch):
 
     return loss_value
 
-def train_activation_transformer(X_train_np, y_train_np, epochs=5, batch_size=32):
+def train_activation_transformer(X_train_np, y_train_np, epochs=125, batch_size=32):
     dataset_size = X_train_np.shape[0]
     for epoch in range(epochs):
         # Shuffle indices
@@ -374,3 +375,46 @@ def evaluate_activation_transformer(X_val_np, y_val_np, batch_size=32):
 
 val_loss = evaluate_activation_transformer(X_val, y_val)
 print(f"Validation Loss with Masking: {val_loss:.4f}")
+
+# ------------------------------------------------
+#  A) Regular Baseline Predictions on Unseen Data
+# ------------------------------------------------
+
+# 1) Load & Preprocess the Unseen Data
+file_path_unseen = '/Users/sohamsane/Documents/Coding Projects/PerceptronDropout/Data/Model2_Split/Acer_Lenovo_laptops.csv'
+unseen_data = pd.read_csv(file_path_unseen)
+unseen_data.fillna(0, inplace=True)
+
+# We'll assume you have these objects from your training script:
+#   preprocessor
+#   trim_encoder
+#   baseline_model
+#   secondary_model
+#   extractor  (the PerceptronExtractor)
+# The baseline model expects the same columns as in `input_columns`
+unseen_preprocessed = preprocessor.transform(unseen_data[input_columns])
+
+# 2) Get the baseline model’s predictions (unmasked)
+unmasked_preds = baseline_model.predict(unseen_preprocessed)
+trim_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+y_trim = data["Price"]  # or your target
+trim_encoder.fit(y_trim.values.reshape(-1, 1))  # or the same data used originally
+unmasked_preds_decoded = trim_encoder.inverse_transform(unmasked_preds)
+
+# 3) Extract the true prices from the last column
+true_prices = unseen_data.iloc[:, -1].values.reshape(-1, 1)
+
+print("\n=== UNSEEN DATA SET: REGULAR BASELINE PREDICTIONS ===")
+print("True Price:", true_prices[:10].flatten())
+print("Predicted Price:", unmasked_preds_decoded[:10].flatten())
+
+# 4) Compute % differences for first 10
+unmasked_diffs = []
+for i in range(min(10, len(true_prices))):
+    true_val = float(true_prices[i][0])
+    pred_val = float(unmasked_preds_decoded[i][0])
+    diff = 100 * abs(true_val - pred_val) / (true_val if true_val != 0 else 1)
+    print(f"Percent Difference for Test Case {i+1}: {diff:.2f}%")
+    unmasked_diffs.append(diff)
+
+print(f"Average Percent Difference (Unmasked Baseline): {np.mean(unmasked_diffs):.2f}%")
