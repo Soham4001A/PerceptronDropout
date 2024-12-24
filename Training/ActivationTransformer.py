@@ -145,18 +145,26 @@ extractor = PerceptronExtractor(baseline_model)
 #    Input = [ original input features (6 after one-hot?), + concatenated perceptron activations ]
 #    Output = a mask indicating which perceptrons to nullify
 # ------------------------------------------------
-def build_activation_transformer(num_input_features, total_perceptrons):
+def build_activation_transformer(num_input_features, total_perceptrons, num_heads=3, ff_dim=128, num_transformer_blocks=2, dropout_rate=0.1):
     """
-    Example: If baseline has 2 Dense layers with 64 and 32 units each,
-    total_perceptrons = 96. 
-    We'll feed the (num_input_features + total_perceptrons) into a model that outputs
-    a binary mask of size 'total_perceptrons'.
+    Build a transformer-based activation transformer model.
+    Input: concatenated [original input features, perceptron activations]
+    Output: mask predicting which perceptrons to nullify.
     """
-    inputs_ = Input(shape=(num_input_features + total_perceptrons,))
-    x = Dense(128, activation="relu")(inputs_)
-    x = Dropout(0.2)(x)
-    x = Dense(64, activation="relu")(x)
-    mask_output = Dense(total_perceptrons, activation="sigmoid")(x)
+    inputs_ = Input(shape=(num_input_features + total_perceptrons,))  # Combined input
+    
+    # Initial Dense layer for embedding inputs
+    x = Dense(64, activation="relu")(inputs_)  # Reduce dimensionality if needed
+    x = Reshape((1, 64))(x)  # Reshape to (batch_size, seq_len=1, embed_dim=64)
+
+    # Add multiple transformer blocks
+    for i in range(num_transformer_blocks):
+        x = TransformerBlock(embed_dim=64, num_heads=num_heads, ff_dim=ff_dim, rate=dropout_rate, name=f"TransformerBlock_{i}")(x)
+    
+    x = Flatten()(x)  # Flatten to (batch_size, features)
+    x = Dense(64, activation="relu")(x)  # Final dense layers for prediction
+    mask_output = Dense(total_perceptrons, activation="sigmoid")(x)  # Predict perceptron mask
+    
     model = Model(inputs=inputs_, outputs=mask_output, name="ActivationTransformer")
     return model
 
@@ -418,3 +426,62 @@ for i in range(min(10, len(true_prices))):
     unmasked_diffs.append(diff)
 
 print(f"Average Percent Difference (Unmasked Baseline): {np.mean(unmasked_diffs):.2f}%")
+
+# ------------------------------------------------
+# B) Masked Predictions on Unseen Data Using Activation Transformer
+# ------------------------------------------------
+
+print("\n=== UNSEEN DATA SET: MASKED PREDICTIONS WITH ACTIVATION TRANSFORMER ===")
+
+# 1) Get the perceptron activations for unseen data
+unseen_tensor = tf.convert_to_tensor(unseen_preprocessed, dtype=tf.float32)
+final_out, perceptron_dict = extractor(unseen_tensor, training=False)
+
+# 2) Flatten perceptron activations into a single vector
+layer_units = []
+all_activations = []
+
+for layer in baseline_model.layers:
+    if isinstance(layer, tf.keras.layers.Dense):
+        layer_units.append(layer.units)
+
+for activation in perceptron_dict.values():
+    all_activations.append(activation)
+
+# Concatenate activations into a single vector per sample
+cat_activations = tf.concat(all_activations, axis=1)  # shape = (batch_size, total_perceptrons)
+
+# 3) Feed [unseen_preprocessed, cat_activations] into the activation transformer
+combined_unseen_input = tf.concat([unseen_tensor, cat_activations], axis=1)
+mask_pred = secondary_model(combined_unseen_input, training=False)  # shape = (batch_size, total_perceptrons)
+
+# 4) Apply the predicted masks to nullify perceptron activations
+masked_perceptron_dict = nullify_activations(perceptron_dict, mask_pred, layer_units, null_value=0.001)
+
+# 5) Run the baseline model forward pass with masked activations
+x = unseen_tensor
+for layer in baseline_model.layers:
+    if isinstance(layer, tf.keras.layers.InputLayer):
+        continue
+    elif isinstance(layer, tf.keras.layers.Dense):
+        layer_name = layer.name
+        x = masked_perceptron_dict[layer_name]  # Use masked activations
+    else:
+        x = layer(x, training=False)
+
+# x is now the final output of the baseline model after applying the masks
+masked_preds = x.numpy()
+
+# 6) Decode the masked predictions
+masked_preds_decoded = trim_encoder.inverse_transform(masked_preds)
+
+# 7) Compare the masked predictions to the true prices
+masked_diffs = []
+for i in range(min(10, len(true_prices))):
+    true_val = float(true_prices[i][0])
+    pred_val = float(masked_preds_decoded[i][0])
+    diff = 100 * abs(true_val - pred_val) / (true_val if true_val != 0 else 1)
+    print(f"Percent Difference for Test Case {i+1}: {diff:.2f}%")
+    masked_diffs.append(diff)
+
+print(f"Average Percent Difference (Masked Predictions): {np.mean(masked_diffs):.2f}%")
